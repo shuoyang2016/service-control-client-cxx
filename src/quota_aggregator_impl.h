@@ -25,6 +25,7 @@ limitations under the License.
 #include "google/api/metric.pb.h"
 #include "google/api/servicecontrol/v1/operation.pb.h"
 #include "google/api/servicecontrol/v1/service_controller.pb.h"
+#include "google/api/servicecontrol/v1/quota_controller.pb.h"
 #include "src/aggregator_interface.h"
 #include "src/cache_removed_items_handler.h"
 #include "src/quota_operation_aggregator.h"
@@ -72,10 +73,14 @@ class QuotaAggregatorImpl : public QuotaAggregator,
  private:
   class CacheElem {
    public:
-    CacheElem(const ::google::api::servicecontrol::v1::AllocateQuotaResponse&
-                  response)
+    CacheElem(const ::google::api::servicecontrol::v1::AllocateQuotaRequest&
+                  request,
+              const ::google::api::servicecontrol::v1::AllocateQuotaResponse&
+                  response, const int64_t time)
         : operation_aggregator_(nullptr),
+          quota_request_(request),
           quota_response_(response),
+          last_refresh_time_(time),
           in_flight_(false) {}
 
     // Aggregates the given request to this cache entry.
@@ -90,14 +95,18 @@ class QuotaAggregatorImpl : public QuotaAggregator,
     // Change the negative response to the positive response for refreshing
     void ClearAllocationErrors() { quota_response_.clear_allocate_errors(); }
 
-    // Setter for AllocateQuota response.
+    // Setter for quota_response_.
     inline void set_quota_response(
         const ::google::api::servicecontrol::v1::AllocateQuotaResponse&
             quota_response) {
       quota_response_ = quota_response;
+
+      if(quota_response.allocate_errors_size() > 0) {
+        operation_aggregator_ = NULL;
+      }
     }
 
-    // Getter for check response.
+    // Getter for quota_response_.
     inline const ::google::api::servicecontrol::v1::AllocateQuotaResponse&
     quota_response() const {
       return quota_response_;
@@ -120,16 +129,30 @@ class QuotaAggregatorImpl : public QuotaAggregator,
       return quota_response().allocate_errors_size() == 0;
     }
 
+    // Setter for last check time.
+    inline void set_last_refresh_time(const int64_t last_refresh_time) {
+      last_refresh_time_ = last_refresh_time;
+    }
+    // Getter for last check time.
+    inline const int64_t last_refresh_time() const { return last_refresh_time_; }
+
    private:
     // Internal operation.
     std::unique_ptr<QuotaOperationAggregator> operation_aggregator_;
 
-    // The check response for the last check request.
+    // The AllocateQuotaRequest for the initial allocate quota request.
+    ::google::api::servicecontrol::v1::AllocateQuotaRequest quota_request_;
+
+    // The AllocateQuotaResponse for the last request.
     ::google::api::servicecontrol::v1::AllocateQuotaResponse quota_response_;
 
-    // maintain the sinature to move unnecessary signaure generation
+    // maintain the signature to move unnecessary signature generation
     std::string signature_;
 
+    // the last refresh time of the cached element
+    int64_t last_refresh_time_;
+
+    // the element is waiting for the response
     bool in_flight_;
   };
 
@@ -156,6 +179,10 @@ class QuotaAggregatorImpl : public QuotaAggregator,
   // Usually called at destructor.
   virtual ::google::protobuf::util::Status FlushAll();
 
+  bool ShouldRefresh(const CacheElem& elem) const;
+
+  bool ShouldDrop(const CacheElem& elem) const;
+
  private:
   // The service name for this cache.
   const std::string service_name_;
@@ -169,8 +196,12 @@ class QuotaAggregatorImpl : public QuotaAggregator,
   Mutex cache_mutex_;
 
   std::unique_ptr<QuotaCache> cache_;
+
   // flush interval in cycles.
-  int64_t flush_interval_in_cycle_;
+  int64_t refresh_interval_in_cycle_;
+
+  // expire interval in cycle
+  int64_t expiration_interval_in_cycle_;
 
   bool in_flush_all_;
 
