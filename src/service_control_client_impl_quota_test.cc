@@ -15,6 +15,9 @@ limitations under the License.
 
 #include "src/mock_transport.h"
 
+#include <thread>
+#include <chrono>
+
 namespace google {
 namespace service_control_client {
 
@@ -232,6 +235,65 @@ TEST_F(ServiceControlClientImplQuotaTest,
   EXPECT_EQ(stat.total_called_quotas, 10);
   EXPECT_EQ(stat.send_quotas_by_flush, 0);
   EXPECT_EQ(stat.send_quotas_in_flight, 10);
+}
+
+TEST_F(ServiceControlClientImplQuotaTest, TestCachedQuotaRefreshGotHTTPError) {
+  // Set callback function to return the negative response
+  mock_quota_transport_.quota_response_ = &error_quota_response1_;
+  mock_quota_transport_.done_status_ = Status::OK;
+
+  EXPECT_CALL(mock_quota_transport_, Quota(_, _, _))
+      .WillRepeatedly(
+          Invoke(&mock_quota_transport_,
+                 &MockQuotaTransport::AllocateQuotaWithInplaceCallback));
+
+  Status done_status = Status::UNKNOWN;
+  AllocateQuotaResponse quota_response;
+
+  // Triggers the initial AllocateQuotaRequset and insert a temporary positive
+  // response to quota cache.
+  cached_client_->Quota(
+      quota_request1_, &quota_response,
+      [&done_status](Status status) { done_status = status; });
+  EXPECT_EQ(done_status, Status::OK);
+  // Check quota_response is positive
+  EXPECT_EQ(quota_response.allocate_errors_size(), 0);
+
+  // AllocateQuotaFlushCallback replaces the cached response with the
+  // negative response, QUOTA_EXHAUSED
+
+  // Set callback function to return the negative status
+  // to simulate HTTP error
+  mock_quota_transport_.done_status_ = Status::CANCELLED;
+
+  // Wait 600ms to trigger the next quota refresh
+  std::this_thread::sleep_for(std::chrono::milliseconds(600));
+
+  // Next Quota call reads the cached negative response, and triggers
+  // the quota cache refresh.
+  cached_client_->Quota(quota_request1_, &quota_response,
+      [&done_status](Status status) { done_status = status; });
+  // Check the cached response is negative
+  EXPECT_EQ(quota_response.allocate_errors_size(), 1);
+
+  // AllocateQuotaFlushCallback replaces the cached negative response with
+  // the temporary positive one for failed open on transport callback error
+
+  // Read the positive response from the cache
+  cached_client_->Quota(
+      quota_request1_, &quota_response,
+      [&done_status](Status status) { done_status = status; });
+
+  // Check the cached response is positive
+  EXPECT_EQ(quota_response.allocate_errors_size(), 0);
+
+  Statistics stat;
+  Status stat_status = cached_client_->GetStatistics(&stat);
+
+  EXPECT_EQ(stat_status, Status::OK);
+  EXPECT_EQ(stat.total_called_quotas, 3);
+  EXPECT_EQ(stat.send_quotas_by_flush, 2);
+  EXPECT_EQ(stat.send_quotas_in_flight, 0);
 }
 
 // Cached: true, Callback: stored
