@@ -30,9 +30,18 @@ typedef std::unordered_map<std::string,
                            ::google::api::MetricDescriptor::MetricKind>
     MetricKindMap;
 
+// Default cache size
+constexpr int kDefaultQuotaCacheSize = 10000;
+// Default refresh interval is 1 second.
+constexpr int kDefaultQuotaRefreshInMs = 1000;
+// Since supported rate-limiting window is per minute, it make sense
+// to expire quota cache items in 1 minute.
+constexpr int kDefaultQuotaExpirationInMS = 60000;
+
 struct QuotaAggregationOptions {
-  QuotaAggregationOptions() : num_entries(10000), refresh_interval_ms(1000),
-      expiration_interval_ms(600000){}
+  QuotaAggregationOptions() : num_entries(kDefaultQuotaCacheSize),
+                              refresh_interval_ms(kDefaultQuotaRefreshInMs),
+                              expiration_interval_ms(kDefaultQuotaExpirationInMS){}
 
   // Constructor.
   // cache_entries is the maximum number of cache entries that can be kept in
@@ -42,7 +51,7 @@ struct QuotaAggregationOptions {
   // expiration_interval_ms should be at lease 10 times bigger
   // than the rate limit service's refill time window.
   QuotaAggregationOptions(int cache_entries, int refresh_interval_ms,
-                          int expiration_interval_ms = 600000)
+                          int expiration_interval_ms = kDefaultQuotaExpirationInMS)
       : num_entries(cache_entries), refresh_interval_ms(refresh_interval_ms),
         expiration_interval_ms(expiration_interval_ms) {}
 
