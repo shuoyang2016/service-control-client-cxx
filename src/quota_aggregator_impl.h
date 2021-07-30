@@ -40,6 +40,9 @@ typedef CacheRemovedItemsHandler<
     ::google::api::servicecontrol::v1::AllocateQuotaRequest>
     AllocateQuotaCacheRemovedItemsHandler;
 
+//
+// The algorithm is described in this doc: go/esp-quota-cache
+//
 class QuotaAggregatorImpl : public QuotaAggregator,
                             public AllocateQuotaCacheRemovedItemsHandler {
  public:
@@ -178,8 +181,6 @@ class QuotaAggregatorImpl : public QuotaAggregator,
   // Flushes out all cached check responses; clears all cache items.
   // Usually called at destructor.
   virtual ::google::protobuf::util::Status FlushAll();
-
-  bool ShouldRefresh(const CacheElem& elem) const;
 
   bool ShouldDrop(const CacheElem& elem) const;
 

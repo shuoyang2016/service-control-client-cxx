@@ -151,27 +151,6 @@ void QuotaAggregatorImpl::SetFlushCallback(FlushCallback callback) {
     return ::google::protobuf::util::OkStatus();
   }
 
-  if (lookup.value()->in_flight() == false &&
-      ShouldRefresh(*lookup.value()) == true) {
-    // Update in_flight to avoid duplicated request
-    lookup.value()->set_in_flight(true);
-    lookup.value()->set_last_refresh_time(SimpleCycleTimer::Now());
-
-    AllocateQuotaRequest refresh_request =
-        lookup.value()->ReturnAllocateQuotaRequestAndClear(service_name_,
-                                                           service_config_id_);
-    if(!lookup.value()->is_positive_response()) {
-      // If the cached response is negative, then use NORMAL QuotaMode
-      // instead of BEST_EFFORT
-      refresh_request.mutable_allocate_operation()->
-          set_quota_mode(
-              QuotaOperation_QuotaMode::QuotaOperation_QuotaMode_NORMAL);
-    }
-
-    // Triggers refresh
-    AddRemovedItem(refresh_request);
-  }
-
   // Aggregate tokens if the cached response is positive
   if (lookup.value()->is_positive_response()) {
     lookup.value()->Aggregate(request);
@@ -210,12 +189,6 @@ void QuotaAggregatorImpl::SetFlushCallback(FlushCallback callback) {
 int QuotaAggregatorImpl::GetNextFlushInterval() {
   if (!cache_) return -1;
   return options_.refresh_interval_ms;
-}
-
-// Check the cached element should be refreshed
-bool QuotaAggregatorImpl::ShouldRefresh(const CacheElem& elem) const {
-  int64_t age = SimpleCycleTimer::Now() - elem.last_refresh_time();
-  return age >= refresh_interval_in_cycle_;
 }
 
 // Check the cached element should be dropped from the cache
@@ -258,20 +231,58 @@ bool QuotaAggregatorImpl::ShouldDrop(const CacheElem& elem) const {
 
 // OnCacheEntryDelete will be called behind the cache_mutex_
 // no need to consider locking at this point
+//
+// Each cached item is removed after refresh_interval and
+// this OnCacheEntryDelete() is called for each removed item.
+//
+// This is how it is implemented:
+// * cache->SetAgeBasedEviction(refresh_interval) is called at constructor.
+//   It makes the cache as AgeBased and items older than refresh_interval
+//   could be evicted.
+// * But eviction only happens when the cache is full or
+//   the function cache->RemoveExpiredEntries() is called.
+// * Flush() function calls cache->RemoveExpiredEntries() and it is called
+//   periodically by service_control_impl.cc at refresh_interval.
+//
 void QuotaAggregatorImpl::OnCacheEntryDelete(CacheElem* elem) {
-  if (in_flush_all_ == false && ShouldDrop(*elem) == false) {
-    // insert the element back to the cache
-    cache_->Insert(elem->signature(), elem, 1);
-
-    if (elem->in_flight() == false && elem->is_aggregated()) {
-      elem->set_in_flight(true);
-      elem->set_last_refresh_time(SimpleCycleTimer::Now());
-      AddRemovedItem(elem->ReturnAllocateQuotaRequestAndClear(
-        service_name_, service_config_id_));
-    }
-  } else {
+  if (in_flush_all_ || ShouldDrop(*elem)) {
     delete elem;
+    return;
   }
+
+  if (elem->in_flight()) {
+    // This item is still calling the server, add it back to the cache
+    // to wait for the response.
+    cache_->Insert(elem->signature(), elem, 1);
+    return;
+  }
+
+  // For an aggregated item, send the aggregated cost to the server.
+  // For an negative item, send CHECK_ONLY to check available quota.
+  if (elem->is_aggregated() || !elem->is_positive_response()) {
+    elem->set_in_flight(true);
+    elem->set_last_refresh_time(SimpleCycleTimer::Now());
+    auto request = elem->ReturnAllocateQuotaRequestAndClear(
+        service_name_, service_config_id_);
+    if (!elem->is_positive_response()) {
+      request.mutable_allocate_operation()->
+          set_quota_mode(
+              QuotaOperation_QuotaMode::QuotaOperation_QuotaMode_CHECK_ONLY);
+    }
+    // Insert the element back to the cache
+    // This is important for negative items to reject new requests.
+    cache_->Insert(elem->signature(), elem, 1);
+    // AddRemovedItem function name is misleading, it actually calls
+    // transport function to send the request to server.
+    AddRemovedItem(request);
+    return;
+  }
+
+  // The postive and non-aggregated items reach here. Add them back to
+  // the cache to reduce quota allocation calls. Even through removing them will
+  // reduce cache size, but it will increase cache misses and quota calls since
+  // each cache miss will cause a quota call.
+  cache_->Insert(elem->signature(), elem, 1);
 }
 
 std::unique_ptr<QuotaAggregator> CreateAllocateQuotaAggregator(
